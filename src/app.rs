@@ -9,7 +9,7 @@ const MAX_HISTORY: usize = 60;
 const MAX_LOG: usize = 100;
 
 /// Field labels for the config modal
-pub const MODAL_FIELD_LABELS: [&str; 4] = ["Pair Address", "Chain", "Target MCap ($)", "Interval (s)"];
+pub const MODAL_FIELD_LABELS: [&str; 4] = ["Token / Pair Address", "Chain", "Target MCap ($)", "Interval (s)"];
 
 #[allow(dead_code)]
 pub struct App {

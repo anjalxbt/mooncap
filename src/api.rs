@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 #[allow(dead_code)]
-const BASE_URL: &str = "https://api.dexscreener.com/latest/dex/pairs";
+const BASE_URL: &str = "https://api.dexscreener.com/latest/dex";
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -79,12 +79,22 @@ pub struct Liquidity {
 pub async fn fetch_pair_data(
     client: &reqwest::Client,
     chain: &str,
-    pair: &str,
+    address: &str,
 ) -> Result<PairData, String> {
-    let url = format!("{}/{}/{}", BASE_URL, chain, pair);
+    // Try the /tokens/ endpoint first (works with contract addresses)
+    let token_url = format!("{}/tokens/{}", BASE_URL, address);
+    if let Ok(result) = try_fetch(client, &token_url).await {
+        return Ok(result);
+    }
 
+    // Fall back to /pairs/{chain}/{address} (works with pair addresses)
+    let pair_url = format!("{}/pairs/{}/{}", BASE_URL, chain, address);
+    try_fetch(client, &pair_url).await
+}
+
+async fn try_fetch(client: &reqwest::Client, url: &str) -> Result<PairData, String> {
     let response = client
-        .get(&url)
+        .get(url)
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await

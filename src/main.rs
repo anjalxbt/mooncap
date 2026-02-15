@@ -151,9 +151,12 @@ fn handle_modal_input(
             }
         }
         KeyCode::Esc => {
-            // Cancel modal — only close if already configured
             if app.configured {
+                // Already monitoring — just close the modal
                 app.modal_open = false;
+            } else {
+                // First launch, not configured yet — quit the app
+                app.running = false;
             }
         }
         KeyCode::Tab => {

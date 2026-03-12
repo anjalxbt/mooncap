@@ -290,6 +290,8 @@ fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" refresh  ", Style::default().fg(Color::DarkGray)),
         Span::styled("c", Style::default().fg(Color::Yellow).bold()),
         Span::styled(" config  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("d", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" idle  ", Style::default().fg(Color::DarkGray)),
         Span::styled("s", Style::default().fg(Color::Yellow).bold()),
         Span::styled(" stop alarm", Style::default().fg(Color::DarkGray)),
     ]);

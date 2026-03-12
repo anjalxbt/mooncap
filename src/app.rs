@@ -49,6 +49,9 @@ pub struct App {
     pub modal_fields: [String; 4], // [pair, chain, target, interval]
     pub modal_active_field: usize,
     pub configured: bool,
+
+    // Daemon / idle
+    pub go_idle: bool,
 }
 
 impl App {
@@ -92,6 +95,8 @@ impl App {
             ],
             modal_active_field: 0,
             configured: false,
+
+            go_idle: false,
         };
 
         let now = Local::now().format("%H:%M:%S").to_string();
@@ -150,6 +155,8 @@ impl App {
             ],
             modal_active_field: 0,
             configured: true,
+
+            go_idle: false,
         };
 
         let now = Local::now().format("%H:%M:%S").to_string();

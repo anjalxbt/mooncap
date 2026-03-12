@@ -1,6 +1,7 @@
 mod alarm;
 mod api;
 mod app;
+mod daemon;
 mod ui;
 
 use std::io;
@@ -17,9 +18,9 @@ use app::App;
 
 /// 🚀 MoonCap — Monitor any crypto token's market cap from DexScreener
 #[derive(Parser)]
-#[command(name = "mooncap", version, about)]
+#[command(name = "mooncap", version, about, long_about = None)]
 struct Cli {
-    /// The DEX pair address to monitor (opens config modal if omitted)
+    /// The token/pair address to monitor (opens config modal if omitted)
     #[arg(short, long)]
     pair: Option<String>,
 
@@ -42,12 +43,91 @@ struct Cli {
     /// Alarm duration in seconds once target is hit
     #[arg(long, default_value = "300")]
     alarm_duration: u64,
+
+    /// Run in background daemon mode (no TUI, survives terminal close).
+    /// Sends a desktop notification when the target is hit.
+    #[arg(short, long)]
+    daemon: bool,
+
+    /// Stop a running daemon for the given --pair address
+    #[arg(long)]
+    stop: bool,
+
+    /// Internal flag: marks this process as the daemon worker (hidden)
+    #[arg(long, hide = true)]
+    daemon_worker: bool,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    // --stop: kill a running daemon
+    if cli.stop {
+        let pair = cli.pair.as_deref().unwrap_or("");
+        if pair.is_empty() {
+            eprintln!("Error: --stop requires --pair <ADDRESS>");
+            std::process::exit(1);
+        }
+        if let Err(e) = daemon::kill_daemon(pair) {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // --daemon-worker: internal headless worker
+    if cli.daemon_worker {
+        let pair = cli.pair.unwrap_or_default();
+        if pair.is_empty() {
+            eprintln!("Error: --daemon-worker requires --pair");
+            std::process::exit(1);
+        }
+        daemon::run_daemon_worker(
+            pair,
+            cli.chain,
+            cli.target,
+            cli.interval,
+            cli.alarm,
+            cli.alarm_duration,
+        )
+        .await;
+        return Ok(());
+    }
+
+    // --daemon: spawn background process and exit
+    if cli.daemon {
+        let pair = cli.pair.as_deref().unwrap_or("");
+        if pair.is_empty() {
+            eprintln!("Error: --daemon requires --pair <ADDRESS>");
+            std::process::exit(1);
+        }
+        match daemon::spawn_daemon(
+            pair,
+            &cli.chain,
+            cli.target,
+            cli.interval,
+            cli.alarm.as_deref(),
+            cli.alarm_duration,
+        ) {
+            Ok(pid) => {
+                let log_path = daemon::log_file(pair);
+                println!("🌙 MoonCap daemon started in background");
+                println!("   PID:    {}", pid);
+                println!("   Target: ${:.0}", cli.target);
+                println!("   Log:    {}", log_path.display());
+                println!();
+                println!("   Stop with: mooncap --stop --pair {}", pair);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    // Normal TUI mode
     let mut app = if let Some(ref pair) = cli.pair {
         App::new_with_config(
             pair.clone(),
@@ -64,6 +144,34 @@ async fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
     let result = run_app(&mut terminal, &mut app).await;
     ratatui::restore();
+
+    // If the user chose to go idle from the TUI, spawn a daemon
+    if app.go_idle {
+        match daemon::spawn_daemon(
+            &app.pair_address,
+            &app.chain,
+            app.target_market_cap,
+            app.check_interval,
+            app.alarm_file.as_deref(),
+            app.alarm_duration,
+        ) {
+            Ok(pid) => {
+                let log_path = daemon::log_file(&app.pair_address);
+                println!("🌙 MoonCap now running in background (idle mode)");
+                println!("   PID:    {}", pid);
+                println!("   Target: ${:.0}", app.target_market_cap);
+                println!("   Log:    {}", log_path.display());
+                println!();
+                println!(
+                    "   Stop with: mooncap --stop --pair {}",
+                    app.pair_address
+                );
+            }
+            Err(e) => {
+                eprintln!("Error starting idle mode: {}", e);
+            }
+        }
+    }
 
     if let Err(e) = result {
         eprintln!("Application error: {}", e);
@@ -204,6 +312,16 @@ fn handle_normal_input(
         }
         KeyCode::Char('c') => {
             app.open_modal();
+        }
+        KeyCode::Char('d') => {
+            // Go idle — spawn daemon and exit TUI
+            if app.configured && !app.pair_address.is_empty() {
+                app.go_idle = true;
+                app.running = false;
+                if let Some(ref handle) = alarm_handle {
+                    alarm::stop_alarm(handle);
+                }
+            }
         }
         KeyCode::Char('s') => {
             if let Some(ref handle) = alarm_handle {

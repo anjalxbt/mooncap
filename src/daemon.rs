@@ -4,8 +4,20 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 
 use crate::api;
+
+/// Daemon config saved alongside the PID file so the TUI can resume
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DaemonConfig {
+    pub pair: String,
+    pub chain: String,
+    pub target: f64,
+    pub interval: u64,
+    pub alarm: Option<String>,
+    pub alarm_duration: u64,
+}
 
 /// Returns the pidfile path for a given pair address
 pub fn pid_file(pair: &str) -> PathBuf {
@@ -17,6 +29,87 @@ pub fn pid_file(pair: &str) -> PathBuf {
 pub fn log_file(pair: &str) -> PathBuf {
     let safe = pair.chars().take(12).collect::<String>();
     PathBuf::from(format!("/tmp/mooncap-{}.log", safe))
+}
+
+/// Returns the config file path for a given pair address
+fn config_file(pair: &str) -> PathBuf {
+    let safe = pair.chars().take(12).collect::<String>();
+    PathBuf::from(format!("/tmp/mooncap-{}.json", safe))
+}
+
+/// Save daemon config to disk
+fn save_config(pair: &str, config: &DaemonConfig) {
+    let path = config_file(pair);
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// Scan /tmp for any running mooncap daemons and return their configs
+pub fn find_running_daemons() -> Vec<DaemonConfig> {
+    let mut results = Vec::new();
+
+    let entries = match fs::read_dir("/tmp") {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("mooncap-") && name.ends_with(".pid") {
+            // Read PID and check if alive
+            if let Ok(contents) = fs::read_to_string(entry.path()) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    if process_is_alive(pid) {
+                        // Find the matching config file
+                        let stem = name.trim_end_matches(".pid");
+                        let cfg_path = PathBuf::from(format!("/tmp/{}.json", stem));
+                        if let Ok(json) = fs::read_to_string(&cfg_path) {
+                            if let Ok(config) = serde_json::from_str::<DaemonConfig>(&json) {
+                                results.push(config);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Kill a running daemon by pair address and clean up its files
+pub fn kill_daemon(pair: &str) -> Result<(), String> {
+    let pid_path = pid_file(pair);
+    let cfg_path = config_file(pair);
+
+    if !pid_path.exists() {
+        return Err(format!(
+            "No daemon PID file found at {:?}. Is a daemon running?",
+            pid_path
+        ));
+    }
+
+    let contents = fs::read_to_string(&pid_path)
+        .map_err(|e| format!("Failed to read PID file: {}", e))?;
+    let pid: u32 = contents
+        .trim()
+        .parse()
+        .map_err(|_| "Invalid PID in file".to_string())?;
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+
+    let _ = fs::remove_file(&pid_path);
+    let _ = fs::remove_file(&cfg_path);
+    Ok(())
+}
+
+/// Kill daemon silently (no prints, used when TUI resumes)
+pub fn kill_daemon_quiet(pair: &str) {
+    let _ = kill_daemon(pair);
 }
 
 /// Spawn a background daemon worker. Relaunches the binary with --daemon-worker.
@@ -39,15 +132,24 @@ pub fn spawn_daemon(
     if pid_path.exists() {
         if let Ok(contents) = fs::read_to_string(&pid_path) {
             if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if process is still alive
                 if process_is_alive(pid) {
                     return Err(format!("Daemon already running with PID {}", pid));
                 }
             }
         }
-        // Stale pidfile, remove it
         let _ = fs::remove_file(&pid_path);
     }
+
+    // Save config so the TUI can resume later
+    let config = DaemonConfig {
+        pair: pair.to_string(),
+        chain: chain.to_string(),
+        target,
+        interval,
+        alarm: alarm.map(|s| s.to_string()),
+        alarm_duration,
+    };
+    save_config(pair, &config);
 
     let log = fs::OpenOptions::new()
         .create(true)
@@ -73,13 +175,11 @@ pub fn spawn_daemon(
         .stderr(log_err)
         .stdin(process::Stdio::null());
 
-    // Spawn as a detached process
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                // Create new session so the process survives terminal close
                 libc::setsid();
                 Ok(())
             });
@@ -89,47 +189,18 @@ pub fn spawn_daemon(
     let child = cmd.spawn().map_err(|e| format!("Failed to spawn daemon: {}", e))?;
     let pid = child.id();
 
-    // Write PID file
     fs::write(&pid_path, pid.to_string())
         .map_err(|e| format!("Failed to write PID file: {}", e))?;
 
     Ok(pid)
 }
 
-/// Kill a running daemon by reading its PID file
-pub fn kill_daemon(pair: &str) -> Result<(), String> {
-    let pid_path = pid_file(pair);
-
-    if !pid_path.exists() {
-        return Err(format!(
-            "No daemon PID file found at {:?}. Is a daemon running?",
-            pid_path
-        ));
-    }
-
-    let contents = fs::read_to_string(&pid_path)
-        .map_err(|e| format!("Failed to read PID file: {}", e))?;
-    let pid: u32 = contents
-        .trim()
-        .parse()
-        .map_err(|_| "Invalid PID in file".to_string())?;
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
-    }
-
-    let _ = fs::remove_file(&pid_path);
-    println!("🛑 Daemon PID {} terminated.", pid);
-    Ok(())
-}
-
-/// Check if a process is alive (Linux: check /proc/{pid})
+/// Check if a process is alive
 fn process_is_alive(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{}", pid)).exists()
 }
 
-/// The headless background worker loop. Called when --daemon-worker is set.
+/// The headless background worker loop
 pub async fn run_daemon_worker(
     pair: String,
     chain: String,
@@ -142,8 +213,18 @@ pub async fn run_daemon_worker(
     let pid_path = pid_file(&pair);
     let log_path = log_file(&pair);
 
-    // Write/overwrite PID file with our actual PID
     let _ = fs::write(&pid_path, pid.to_string());
+
+    // Also write config in case it wasn't written by the parent
+    let config = DaemonConfig {
+        pair: pair.clone(),
+        chain: chain.clone(),
+        target,
+        interval,
+        alarm: alarm_file.clone(),
+        alarm_duration,
+    };
+    save_config(&pair, &config);
 
     let log = |msg: &str| {
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -205,8 +286,8 @@ pub async fn run_daemon_worker(
 
                         fire_alarm(name, symbol, market_cap, target, alarm_file.as_deref(), alarm_duration);
 
-                        // Clean up PID file and exit
                         let _ = fs::remove_file(&pid_path);
+                        let _ = fs::remove_file(config_file(&pair));
                         log("Daemon exiting after alarm.");
                         return;
                     }
@@ -236,16 +317,13 @@ fn fire_alarm(
         name, symbol, market_cap, target
     );
 
-    // Desktop notification via notify-send
     let _ = process::Command::new("notify-send")
         .args(["--urgency=critical", "--expire-time=0", &summary, &body])
         .spawn();
 
-    // Audio alarm
     let end = Instant::now() + Duration::from_secs(alarm_duration);
 
     if let Some(file) = alarm_file {
-        // Try mpg123 for mp3 files, paplay for wav
         while Instant::now() < end {
             let status = if file.ends_with(".mp3") {
                 process::Command::new("mpg123")
@@ -257,16 +335,11 @@ fn fire_alarm(
                     .status()
             };
 
-            if status.is_err() {
-                break;
-            }
-
-            if Instant::now() >= end {
+            if status.is_err() || Instant::now() >= end {
                 break;
             }
         }
     } else {
-        // Terminal bell loop
         while Instant::now() < end {
             print!("\x07");
             std::thread::sleep(Duration::from_secs(2));

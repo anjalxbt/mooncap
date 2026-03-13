@@ -138,7 +138,22 @@ async fn main() -> io::Result<()> {
             cli.alarm_duration,
         )
     } else {
-        App::new_interactive(cli.alarm.clone(), cli.alarm_duration)
+        // Check for a running daemon to resume from
+        let daemons = daemon::find_running_daemons();
+        if let Some(cfg) = daemons.into_iter().next() {
+            // Kill the daemon and take over in TUI mode
+            daemon::kill_daemon_quiet(&cfg.pair);
+            App::new_with_config(
+                cfg.pair,
+                cfg.chain,
+                cfg.target,
+                cfg.interval,
+                cfg.alarm.or(cli.alarm.clone()),
+                cfg.alarm_duration,
+            )
+        } else {
+            App::new_interactive(cli.alarm.clone(), cli.alarm_duration)
+        }
     };
 
     let mut terminal = ratatui::init();

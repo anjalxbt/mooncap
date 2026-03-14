@@ -2,6 +2,8 @@ mod alarm;
 mod api;
 mod app;
 mod daemon;
+// remove this to avoid animation
+mod splash;
 mod ui;
 
 use std::io;
@@ -157,6 +159,11 @@ async fn main() -> io::Result<()> {
     };
 
     let mut terminal = ratatui::init();
+
+    // Play startup animation
+    // remove this to avoid animation
+    splash::run_splash(&mut terminal);
+
     let result = run_app(&mut terminal, &mut app).await;
     ratatui::restore();
 
